@@ -1,10 +1,12 @@
 Prompt Manager keeps a library of Markdown prompts on the machine that runs the Paseo daemon, with search, folders, tags, and a **Prompts** item in the sidebar. The library is shared by all clients and agents of that daemon. Each save keeps a full snapshot of the prompt, and you can view a snapshot and restore it as a new version.
 
-A prompt is sent to an agent only when you choose it, from the composer, an attachment, or a slash command. The agent receives the prompt body. If a file was edited outside the plugin, saving a stale draft is rejected instead of overwriting it.
+In the composer, choose several prompts from the 前置 (prepend) and 后置 (append) groups. Prompts are ordered by their saved order number and inserted around your message in the main input. Edit the draft and send it yourself. The panel action and `/prompt <id>` also update the draft. Selecting a prompt never starts an agent turn. Attachments remain available for adding prompt bodies as resources.
+
+Selections stay checked after a failed send and clear when the message is accepted or queued locally. Edits you make inside an inserted prompt become your own text; deselecting that prompt preserves those edits. Reference prompts are listed separately and disabled: in Pi they modify system instructions, which this draft feature cannot reproduce. If a file was edited outside the plugin, saving a stale draft is rejected instead of overwriting it.
 
 ## Setup
 
-Prompt Manager requires Paseo 0.11.0-beta.3 or later on the daemon and on each app that shows it. Local use needs no other setup.
+This local edition requires Paseo 0.11.1 with the added client composer capability. Stock 0.11.1 clients do not include it. Reload the updated desktop window before using draft insertion. The library remains on the daemon host, while draft editing affects only this client. Edit a prompt’s display name, placement, and order in its details.
 
 Git sync is optional. It needs:
 

@@ -4,6 +4,7 @@ import { link, lstat, mkdir, open, opendir, readdir, rename, rmdir, unlink } fro
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { compositionMetadata } from "../shared/prompts.ts";
 import { previewLines } from "../shared/markdown.ts";
 import type { ImportResult, LibrarySettings, LibrarySettingsInput, Prompt, Version } from "../shared/prompts.ts";
 
@@ -43,17 +44,19 @@ function normalizeFolder(path: string, prompt = false) {
 
 const folderOf = (id: string) => id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "";
 const preview = (content: string) => previewLines(content).join(" ").replace(/\s+/g, " ").slice(0, 300);
-type Metadata = { description: string; tags: string[] };
+type Metadata = { description: string; tags: string[]; placement?: Prompt["placement"]; order?: number; displayName?: string };
 
-function metadata(value: Metadata): Metadata {
+function metadata(value: Metadata) {
   if (typeof value.description !== "string" || value.description.length > 2000 || !Array.isArray(value.tags)
     || value.tags.length > 30 || value.tags.some((tag) => typeof tag !== "string" || !tag.trim() || tag.trim().length > 40)) throw new Error("Invalid prompt metadata.");
-  return { description: value.description, tags: [...new Set(value.tags.map((tag) => tag.trim()))] };
+  const fallbackPlacement = value.tags.includes("prepend") ? "prepend" : value.tags.includes("reference") ? "reference" : "append";
+  const composition = compositionMetadata.parse({ ...value, placement: value.placement ?? fallbackPlacement });
+  return { description: value.description, tags: [...new Set(value.tags.map((tag) => tag.trim()))], ...composition };
 }
 
 function decode(raw: string) {
   const header = /^---\npaseo: (\{[^\n]*\})\n---\n/.exec(raw);
-  if (!header) return { content: raw, description: "", tags: [] as string[] };
+  if (!header) return { content: raw, ...metadata({ description: "", tags: [] }) };
   let value: Metadata;
   try { value = JSON.parse(header[1]!) as Metadata; } catch { throw new Error("Invalid prompt metadata."); }
   return { content: raw.slice(header[0].length), ...metadata(value) };
@@ -61,7 +64,7 @@ function decode(raw: string) {
 
 function encode(content: string, value: Metadata) {
   const normalized = metadata(value);
-  const raw = normalized.description || normalized.tags.length ? `---\npaseo: ${JSON.stringify(normalized)}\n---\n${content}` : content;
+  const raw = normalized.description || normalized.tags.length || normalized.displayName || normalized.placement !== "append" || normalized.order !== 9999 ? `---\npaseo: ${JSON.stringify(normalized)}\n---\n${content}` : content;
   validateContent(raw);
   return raw;
 }
@@ -98,7 +101,7 @@ async function regularFile(path: string) {
 async function directory(path: string, create = true) {
   const absolute = resolve(path);
   let current = parse(absolute).root;
-  for (const segment of absolute.slice(current.length).split("/").filter(Boolean)) {
+  for (const segment of absolute.slice(current.length).split(/[\\/]/).filter(Boolean)) {
     current = join(current, segment);
     try {
       const info = await lstat(current);
@@ -286,12 +289,12 @@ export class PromptLibrary {
     if (!latest) return null;
     const raw = await this.historicalContent(root, id, latest.filename);
     const value = decode(raw);
-    return { id, folder: folderOf(id), title: this.title(id, value.content), ...value, revision: digest(`archived\0${latest.filename}\0${raw}`), updatedAt: latest.createdAt, archived: true };
+    return { id, folder: folderOf(id), title: value.displayName || this.title(id, value.content), ...value, revision: digest(`archived\0${latest.filename}\0${raw}`), updatedAt: latest.createdAt, archived: true };
   }
 
   private active(id: string, raw: string, updatedAt: string): Prompt {
     const value = decode(raw);
-    return { id, folder: folderOf(id), title: this.title(id, value.content), ...value, revision: digest(raw), updatedAt, archived: false };
+    return { id, folder: folderOf(id), title: value.displayName || this.title(id, value.content), ...value, revision: digest(raw), updatedAt, archived: false };
   }
 
   /** Reads a prompt found by scan(), which already skipped linked folders, reusing unchanged files. */
@@ -411,7 +414,7 @@ export class PromptLibrary {
       const prompts = (await this.matching(root, query, false)).sort((a, b) => rank(a) - rank(b) || a.title.localeCompare(b.title));
       return { items: prompts.slice(0, 50).map((prompt) => ({
         id: prompt.id, identifier: "", url: pathToFileURL(join(root, `${prompt.id}.md`)).href,
-        title: prompt.title, subtitle: preview(prompt.content) || prompt.description, text: prompt.content, resourceType: "prompt",
+        title: prompt.title, subtitle: preview(prompt.content) || prompt.description, text: prompt.content, resourceType: "prompt", placement: prompt.placement, order: prompt.order, displayName: prompt.displayName,
       })) };
     });
   }
@@ -499,7 +502,7 @@ export class PromptLibrary {
     });
   }
 
-  save(input: { id?: string; name: string; content: string; revision: string | null; folder?: string; description?: string; tags?: string[] }) {
+  save(input: { id?: string; name: string; content: string; revision: string | null; folder?: string; description?: string; tags?: string[]; placement?: Prompt["placement"]; order?: number; displayName?: string }) {
     return this.write(async (root) => {
       validateContent(input.content);
       const oldId = input.id ? validId(input.id) : undefined;
@@ -510,7 +513,7 @@ export class PromptLibrary {
       const current = await this.current(root, oldId ?? id);
       this.checkRevision(current, input.revision);
       if (current?.archived) throw new Error("Restore this archived prompt before editing it.");
-      const raw = encode(input.content, { description: input.description ?? current?.description ?? "", tags: input.tags ?? current?.tags ?? [] });
+      const raw = encode(input.content, { description: input.description ?? current?.description ?? "", tags: input.tags ?? current?.tags ?? [], placement: input.placement ?? current?.placement, order: input.order ?? current?.order, displayName: input.displayName ?? current?.displayName });
       const moving = Boolean(current && id !== current.id);
       if (moving && await this.current(root, id)) throw new Error(`Prompt "${id}" already exists, including archived versions.`);
       await directory(dirname(join(root, `${id}.md`)));

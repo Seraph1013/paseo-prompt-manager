@@ -28,7 +28,7 @@ test("saves markdown unchanged with normalized stable ids and numbered snapshots
   const versions = await library.versions(first.id);
   assert.deepEqual(versions.map((version) => version.version), [2, 1]);
   assert.match(versions[1]!.filename, /^code-review\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_v1\.md$/);
-  assert.deepEqual(await library.version({ id: first.id, filename: versions[1]!.filename }), { content: first.content, description: "", tags: [] });
+  assert.deepEqual(await library.version({ id: first.id, filename: versions[1]!.filename }), { content: first.content, description: "", tags: [], placement: "append", order: 9999, displayName: "" });
   assert.deepEqual((await readdir(root)).sort(), ["code-review.md", "versions"]);
 });
 
@@ -285,7 +285,7 @@ test("stores metadata in Markdown, searches tags and descriptions, and restores 
   const first = await library.save({ name: "Review", content: "# Review\nRead changes.", revision: null, description: "Security checklist", tags: ["security", "backend", "security"] });
   assert.deepEqual(first.tags, ["security", "backend"]);
   const raw = await readFile(join(root, "review.md"), "utf8");
-  assert.equal(raw, '---\npaseo: {"description":"Security checklist","tags":["security","backend"]}\n---\n# Review\nRead changes.');
+  assert.equal(raw, '---\npaseo: {"description":"Security checklist","tags":["security","backend"],"placement":"append","order":9999,"displayName":""}\n---\n# Review\nRead changes.');
   const initialVersion = (await library.versions(first.id))[0]!;
   const second = await library.save({ id: first.id, name: "ignored", content: first.content, revision: first.revision, description: "Style checklist", tags: ["style"] });
   assert.notEqual(second.revision, first.revision);
@@ -294,7 +294,7 @@ test("stores metadata in Markdown, searches tags and descriptions, and restores 
   assert.deepEqual(await library.list({ tag: "security" }), []);
   const attachment = (await library.search("style checklist")).items[0]!;
   assert.equal(attachment.text, first.content);
-  assert.deepEqual(await library.version({ id: first.id, filename: initialVersion.filename }), { content: first.content, description: first.description, tags: first.tags });
+  assert.deepEqual(await library.version({ id: first.id, filename: initialVersion.filename }), { content: first.content, description: first.description, tags: first.tags, placement: first.placement, order: first.order, displayName: first.displayName });
   const restored = await library.restore({ id: first.id, filename: initialVersion.filename, revision: second.revision });
   assert.equal(restored.description, first.description);
   assert.deepEqual(restored.tags, first.tags);
@@ -506,4 +506,64 @@ test("keeps sync preferences when settings omit them and rejects invalid values"
   await create(library);
   await library.list();
   assert.deepEqual(changes, ["change"]);
+});
+
+
+test("retains native snippet metadata across save, search and version restore", async (t) => {
+  const { library } = await fixture(t);
+  const first = await library.save({ name: "snippet", content: "unchanged body", revision: null, placement: "prepend", order: 12, displayName: "前置说明" });
+  assert.equal(first.title, "前置说明");
+  const result = (await library.search("前置说明")).items[0];
+  assert.equal(result.placement, "prepend");
+  assert.equal(result.order, 12);
+  const changed = await library.save({ id: first.id, name: first.id, content: "edited", revision: first.revision });
+  assert.equal(changed.placement, "prepend");
+  assert.equal(changed.order, 12);
+  const version = (await library.versions(first.id))[1];
+  const restored = await library.restore({ id: first.id, filename: version.filename, revision: changed.revision });
+  assert.equal(restored.content, "unchanged body");
+  assert.equal(restored.displayName, "前置说明");
+});
+
+test("composes ordered snippets around edited body and preserves edits when deselected", async () => {
+  const { changeSelection } = await import("../client/composition.ts");
+  const pre = { id: "pre", title: "pre", text: "PREFIX", placement: "prepend" as const, order: 20 };
+  const earlier = { ...pre, id: "early", text: "FIRST", order: 10 };
+  const post = { ...pre, id: "post", text: "SUFFIX", placement: "append" as const };
+  let state = { text: "body", selected: [], submissionRevision: 0, preservedEdits: false } as Parameters<typeof changeSelection>[0];
+  state = changeSelection(state, state.text, pre);
+  state = changeSelection(state, state.text, earlier);
+  state = changeSelection(state, state.text, post);
+  assert.equal(state.text, "FIRST\n\nPREFIX\n\nbody\n\nSUFFIX");
+  state = changeSelection(state, state.text.replace("body", "my edited body"), earlier);
+  assert.equal(state.text, "PREFIX\n\nmy edited body\n\nSUFFIX");
+  state = changeSelection(state, state.text.replace("PREFIX", "MY PREFIX"), pre);
+  assert.equal(state.text, "MY PREFIX\n\nmy edited body\n\nSUFFIX");
+  state = changeSelection(state, state.text, post);
+  assert.equal(state.text, "MY PREFIX\n\nmy edited body");
+  assert.throws(() => changeSelection(state, state.text, { ...pre, placement: "reference" }), /system instructions/);
+});
+
+
+test("selection survives failed sends and resets on accepted sends after composer closes", async () => {
+  const { createPromptComposition } = await import("../client/composition.ts");
+  let draft = { text: "body", revision: 0, submissionRevision: 0 };
+  const listeners = new Set<(value: typeof draft) => void>();
+  let open = true;
+  const composition = createPromptComposition({ composer: { ref() { return {
+    getDraft() { if (!open) throw new Error("closed"); return draft; },
+    replaceDraft(input) { assert.equal(input.revision, draft.revision); draft = { ...draft, text: input.text, revision: draft.revision + 1 }; return draft; },
+    subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+  }; } } });
+  const snippet = { id: "post", title: "post", text: "POST", placement: "append" as const, order: 10 };
+  composition.toggle("agent", snippet);
+  assert.equal(draft.text, "body\n\nPOST");
+  for (const listener of listeners) listener(draft);
+  assert.equal(composition.selected("agent").length, 1);
+  open = false;
+  draft = { ...draft, submissionRevision: 1 };
+  for (const listener of listeners) listener(draft);
+  assert.equal(composition.selected("agent").length, 0);
+  composition.dispose();
+  assert.equal(listeners.size, 0);
 });

@@ -2,6 +2,6 @@
   "id": "paseo-prompt-manager",
   "description": "Markdown prompt library with version history, imports, and optional Git sync",
   "requirements": {
-    "paseo": ">=0.11.0-beta.3"
+    "paseo": ">=0.11.1"
   }
 }

@@ -1,9 +1,10 @@
 import type { PluginAgentPanelProps, PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { usePaseo, useRpc } from "@getpaseo/plugin/client";
+import { useRpc } from "@getpaseo/plugin/client";
 import { Icon, ScrollView, TextInput, useToast } from "@getpaseo/plugin/client/react-native";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, View } from "react-native";
+import { usePromptComposition } from "./composition-context";
 import { MarkdownPreview } from "./markdown";
 import { FolderPicker, FolderBreadcrumb } from "./editor";
 import { VersionHistory } from "./history";
@@ -28,7 +29,8 @@ export function PromptPanel(props: PluginAgentPanelProps) {
 
 export function PromptLibrary({ theme, layout, agentId }: Props) {
   const colors = theme.colors;
-  const paseo = usePaseo();
+  const composition = usePromptComposition();
+  const selectedSnippets = useSyncExternalStore(composition.subscribe, () => composition.selected(agentId ?? ""));
   const toast = useToast();
   const cache = useQueryClient();
   const settingsRpc = useRpc(getSettings);
@@ -55,6 +57,9 @@ export function PromptLibrary({ theme, layout, agentId }: Props) {
   const [content, setContent] = useState("");
   const [description, setDescription] = useState("");
   const [tagsText, setTagsText] = useState("");
+  const [placement, setPlacement] = useState<Prompt["placement"]>("append");
+  const [orderText, setOrderText] = useState("9999");
+  const [displayName, setDisplayName] = useState("");
   const [folder, setFolder] = useState("");
   const [filterFolder, setFilterFolder] = useState<string | undefined>(undefined);
   const [filterTag, setFilterTag] = useState<string | undefined>(undefined);
@@ -131,6 +136,7 @@ export function PromptLibrary({ theme, layout, agentId }: Props) {
   const busy = mutation.isPending;
   const tags = [...new Set(tagsText.split(",").map((tag) => tag.trim()).filter(Boolean))];
   const draftDirty = name !== (current?.title ?? "") || content !== (current?.content ?? "") ||
+    placement !== (current?.placement ?? "append") || orderText !== String(current?.order ?? 9999) || displayName !== (current?.displayName ?? "") ||
     description !== (current?.description ?? "") || tagsText !== (current?.tags.join(", ") ?? "") || Boolean(current && folder !== current.folder);
   const configDirty = mode === "settings" && Boolean(settings.data) &&
     (directory !== settings.data?.directory || gitEnabled !== settings.data?.gitEnabled);
@@ -153,6 +159,9 @@ export function PromptLibrary({ theme, layout, agentId }: Props) {
     setContent(prompt?.content ?? "");
     setDescription(prompt?.description ?? "");
     setTagsText(prompt?.tags.join(", ") ?? "");
+    setPlacement(prompt?.placement ?? "append");
+    setOrderText(String(prompt?.order ?? 9999));
+    setDisplayName(prompt?.displayName ?? "");
     setFolder(prompt?.folder ?? filterFolder ?? "");
     setOrganize(false);
     setDetails(!prompt);
@@ -196,7 +205,9 @@ export function PromptLibrary({ theme, layout, agentId }: Props) {
     success(`Folder "${created.path}" created.`);
   });
   const save = () => run(async () => {
-    const saved = await saveRpc({ id: current?.id, name: current ? current.id.split("/").at(-1)! : name, content, revision: current?.revision ?? null, description, tags, folder });
+    const order = Number(orderText);
+    if (!orderText.trim() || !Number.isInteger(order) || Math.abs(order) > 1000000) throw new Error("排序必须是 -1000000 到 1000000 之间的整数。");
+    const saved = await saveRpc({ id: current?.id, name: current ? current.id.split("/").at(-1)! : name, content, revision: current?.revision ?? null, description, tags, folder, placement, order, displayName });
     accept(saved);
     setDetails(false);
     await refresh();
@@ -221,9 +232,9 @@ export function PromptLibrary({ theme, layout, agentId }: Props) {
   });
   const sendToAgent = () => run(async () => {
     const saved = await readRpc({ id: current!.id });
-    if (saved.archived) throw new Error("This prompt is archived. Restore it before sending.");
-    await paseo.agents.ref(agentId!).send(saved.content);
-    success("Prompt sent to this agent.");
+    if (saved.archived) throw new Error("This prompt is archived. Restore it before inserting.");
+    const preserved = composition.toggle(agentId!, { ...saved, text: saved.content });
+    success(preserved ? "已保留手动修改的文本。" : "已更新对话栏草稿，请检查后发送。");
   });
   const saveDisabled = locked || !draftDirty || !name.trim() || !content.trim() || Boolean(current?.archived);
   const fullEditor = mode === "editor" && expanded;
@@ -251,6 +262,16 @@ export function PromptLibrary({ theme, layout, agentId }: Props) {
               <TextInput accessibilityLabel="Prompt filename" value={name} onChangeText={setName} editable={!locked} autoCapitalize="none" autoCorrect={false} placeholder="code-review" placeholderTextColor={colors.foregroundMuted} style={{ ...input, backgroundColor: colors.surface0, fontFamily: "monospace", fontSize: 13 }} />
             </Field>
           )}
+          <Field label="显示名称" colors={colors}>
+            <TextInput accessibilityLabel="Prompt display name" value={displayName} onChangeText={setDisplayName} editable={!readOnly} maxLength={120} placeholder="默认使用 Markdown 标题" placeholderTextColor={colors.foregroundMuted} style={input} />
+          </Field>
+          <Field label="插入位置" colors={colors}>
+            <Segmented options={[{ value: "prepend", label: "前置" }, { value: "append", label: "后置" }, { value: "reference", label: "Reference" }]} value={placement} onChange={setPlacement} colors={colors} disabled={readOnly} />
+            {placement === "reference" && <Text style={muted}>Pi 系统提示词，不能自动注入 Paseo。</Text>}
+          </Field>
+          <Field label="排序" hint="数字越小越靠前。" colors={colors}>
+            <TextInput accessibilityLabel="Prompt order" value={orderText} onChangeText={setOrderText} editable={!readOnly} keyboardType="numbers-and-punctuation" style={input} />
+          </Field>
           <Field label="Description" hint="Shown in the library and searchable. Explain when to use this prompt." colors={colors}>
             <TextInput accessibilityLabel="Prompt description" value={description} onChangeText={setDescription} editable={!readOnly} maxLength={2000} multiline placeholder="When to use this prompt" placeholderTextColor={colors.foregroundMuted} style={{ ...input, backgroundColor: colors.surface0, minHeight: 60 }} />
           </Field>
@@ -307,12 +328,12 @@ export function PromptLibrary({ theme, layout, agentId }: Props) {
         <Button title={draftDirty ? "Save" : "Saved"} icon={draftDirty ? "Save" : "Check"} variant="primary" onPress={save} colors={colors} disabled={saveDisabled} accessibilityLabel="Save prompt" />
         {draftDirty && <Button title="Discard" icon="RotateCcw" variant="ghost" onPress={() => guard(() => accept(current))} colors={colors} disabled={locked} accessibilityLabel="Discard draft" />}
         {current && <Button title="History" icon="History" variant="ghost" active={history} onPress={() => { setHistory(!history); setVersion(null); }} colors={colors} disabled={locked} accessibilityLabel={history ? "Hide history" : "Version history"} />}
-        {agentId && current && !current.archived && <Button title="Send to agent" icon="Send" onPress={sendToAgent} colors={colors} disabled={locked || draftDirty} accessibilityLabel="Send saved prompt to agent" />}
+        {agentId && current && !current.archived && <Button title={selectedSnippets.some((item) => item.id === current.id) ? "取消选择" : "插入对话栏"} icon="TextCursorInput" onPress={sendToAgent} colors={colors} disabled={locked || draftDirty || current.placement === "reference"} accessibilityLabel="Insert saved prompt into conversation draft" />}
         <View style={{ flex: 1 }} />
         {current && !current.archived && <IconButton icon="Archive" label="Archive prompt" tone="danger" onPress={() => guard(() => setArchiveConfirm(true))} colors={colors} disabled={locked} />}
       </View>
-      {current?.archived && <Banner tone="warning" colors={colors} message="This prompt is archived. Restore it to edit or send it." action={<Button title="Restore" icon="ArchiveRestore" size="sm" onPress={restoreArchived} colors={colors} disabled={locked} />} />}
-      {agentId && current && draftDirty && !current.archived && <Meta colors={colors} icon="Info">Save your changes before sending this prompt to the agent.</Meta>}
+      {current?.archived && <Banner tone="warning" colors={colors} message="This prompt is archived. Restore it to edit or insert it." action={<Button title="Restore" icon="ArchiveRestore" size="sm" onPress={restoreArchived} colors={colors} disabled={locked} />} />}
+      {agentId && current && draftDirty && !current.archived && <Meta colors={colors} icon="Info">Save your changes before inserting this prompt into the conversation draft.</Meta>}
       {expanded && !current && <TextInput accessibilityLabel="Prompt filename" value={name} onChangeText={setName} editable={!locked} autoCapitalize="none" autoCorrect={false} placeholder="Filename, for example code-review" placeholderTextColor={colors.foregroundMuted} style={{ ...input, fontFamily: "monospace", fontSize: 13 }} />}
       {!expanded && detailsPanel}
       <View style={{ flex: 1, minHeight: expanded ? 0 : 160, minWidth: 0, flexDirection: layout.compact ? "column" : "row", gap: 10 }}>
@@ -347,7 +368,7 @@ export function PromptLibrary({ theme, layout, agentId }: Props) {
       </EmptyState>
       <Card colors={colors} style={{ width: "100%", maxWidth: 520, gap: 12 }}>
         <Tip icon="Paperclip" colors={colors}>Attach a prompt to any message from the composer's attachment menu under Saved prompt.</Tip>
-        <Tip icon="SquareSlash" colors={colors}>Type /prompt code-review in an agent composer to send that prompt and start a turn.</Tip>
+        <Tip icon="SquareSlash" colors={colors}>Type /prompt code-review to select that prompt for your conversation draft. Review and send it yourself.</Tip>
         <Tip icon="GitBranch" colors={colors}>Turn on Git sync in Settings to back up prompts and their history to a repository.</Tip>
       </Card>
     </ScrollView>
@@ -363,7 +384,7 @@ export function PromptLibrary({ theme, layout, agentId }: Props) {
             </View>
             <View style={{ minWidth: 0, flexShrink: 1 }}>
               <Text style={{ ...text, fontSize: layout.compact ? 18 : 22, fontWeight: "700" }}>Prompts</Text>
-              <Text numberOfLines={1} style={muted}>{agentId ? "Save instructions and send them to this agent." : "Markdown prompts shared across agents on this host."}</Text>
+              <Text numberOfLines={1} style={muted}>{agentId ? "选择前置／后置提示词，插入对话栏后编辑发送。" : "Markdown prompts shared across agents on this host."}</Text>
             </View>
           </View>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
@@ -479,6 +500,9 @@ export function PromptLibrary({ theme, layout, agentId }: Props) {
           setContent(current?.content ?? "");
           setDescription(current?.description ?? "");
           setTagsText(current?.tags.join(", ") ?? "");
+          setPlacement(current?.placement ?? "append");
+          setOrderText(String(current?.order ?? 9999));
+          setDisplayName(current?.displayName ?? "");
           setFolder(current?.folder ?? filterFolder ?? "");
           setDirectory(settings.data?.directory ?? "");
           setGitEnabled(settings.data?.gitEnabled ?? false);
